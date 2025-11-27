@@ -1,0 +1,233 @@
+---
+title: "Stage 1: Data Filtering and Preparation"
+author: "Water Quality Analysis Pipeline"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Overview
+
+This script performs the initial data filtering and preparation stage for baseline water quality analysis. It:
+
+1. Reads raw laboratory water quality results
+2. Parses detection limits (L prefix indicators)
+3. Filters and validates data
+4. Exports cleaned datasets to `data/processed/`
+
+# Load Libraries
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+library(readr)
+
+# Source utility functions
+source("functions/analysis_constants.R")
+source("functions/data_utils.R")
+```
+
+# Read Raw Data
+
+```{r read-data}
+# Read raw laboratory results
+raw_data <- read_csv("../data/raw/ltrn-results.csv", show_col_types = FALSE)
+
+cat("Raw data dimensions:", nrow(raw_data), "rows x", ncol(raw_data), "columns\n")
+cat("Date range:", range(raw_data$SAMPLE_DATETIME, na.rm = TRUE), "\n")
+```
+
+# Parse Detection Limits
+
+```{r parse-detection-limits}
+# Parse values with L prefix (non-detects)
+dl_parsed <- parse_detection_limits(raw_data$VALUE)
+
+# Combine with original data
+data_with_dl <- raw_data %>%
+  bind_cols(dl_parsed) %>%
+  rename(
+    original_value = VALUE,
+    value = numeric_value
+  )
+
+# Summary of censoring
+censoring_summary <- data_with_dl %>%
+  summarise(
+    total_observations = n(),
+    censored_count = sum(is_censored, na.rm = TRUE),
+    censoring_pct = round(calc_censoring_pct(is_censored), 2)
+  )
+
+print(censoring_summary)
+```
+
+# Extract Temporal Information
+
+```{r extract-temporal}
+# Add temporal columns
+temporal_info <- extract_temporal_info(data_with_dl$SAMPLE_DATETIME)
+
+data_processed <- data_with_dl %>%
+  bind_cols(temporal_info)
+
+# Summary by season
+season_summary <- data_processed %>%
+  filter(!is.na(season)) %>%
+  group_by(season) %>%
+  summarise(
+    n_samples = n(),
+    n_censored = sum(is_censored, na.rm = TRUE),
+    pct_censored = round(calc_censoring_pct(is_censored), 2)
+  ) %>%
+  arrange(match(season, c("Under ice", "High flow", "Open water")))
+
+print(season_summary)
+```
+
+# Filter and Validate Data
+
+```{r filter-validate}
+# Group by parameter and station for validation
+data_grouped <- data_processed %>%
+  group_by(VARIABLE_CODE, VARIABLE_NAME, STATION_NO, STATION_NAME) %>%
+  nest() %>%
+  mutate(
+    # Validate sample size (use default from constants)
+    validation = map(data, validate_sample_size),
+    n_obs = map_int(validation, "n"),
+    is_valid = map_lgl(validation, "valid")
+  )
+
+# Summary of valid groups
+valid_summary <- data_grouped %>%
+  ungroup() %>%
+  summarise(
+    total_groups = n(),
+    valid_groups = sum(is_valid),
+    invalid_groups = sum(!is_valid)
+  )
+
+print(valid_summary)
+
+# Show some invalid groups (insufficient data)
+invalid_groups <- data_grouped %>%
+  filter(!is_valid) %>%
+  select(VARIABLE_NAME, STATION_NAME, n_obs) %>%
+  arrange(desc(n_obs))
+
+cat("\nSample of groups with insufficient data (n < ", MIN_SAMPLE_SIZE, "):\n", sep="")
+print(head(invalid_groups, 10))
+```
+
+# Export Processed Data
+
+```{r export-data}
+# Export full processed dataset
+data_for_analysis <- data_processed %>%
+  select(
+    STATION_NO,
+    STATION_NAME,
+    STATION_DESCRIPTION,
+    M_LATITUDE,
+    M_LONGITUDE,
+    SAMPLE_DATETIME,
+    datetime,
+    year,
+    month,
+    season,
+    VARIABLE_CODE,
+    VARIABLE_NAME,
+    UNIT_CODE,
+    original_value,
+    value,
+    is_censored,
+    detection_limit,
+    PROJECT_NO,
+    SAMPLE_NO
+  )
+
+# Export to processed directory
+write_csv(data_for_analysis, "../data/processed/filtered_data.csv")
+cat("Exported filtered data to: data/processed/filtered_data.csv\n")
+
+# Export validation summary for groups
+group_summary <- data_grouped %>%
+  unnest(data) %>%
+  group_by(VARIABLE_CODE, VARIABLE_NAME, STATION_NO, STATION_NAME) %>%
+  summarise(
+    n_obs = n(),
+    n_censored = sum(is_censored, na.rm = TRUE),
+    pct_censored = round(calc_censoring_pct(is_censored), 2),
+    date_range_start = min(datetime, na.rm = TRUE),
+    date_range_end = max(datetime, na.rm = TRUE),
+    n_seasons = n_distinct(season, na.rm = TRUE),
+    single_month = is_single_month(month),
+    .groups = "drop"
+  )
+
+write_csv(group_summary, "../data/processed/group_summary.csv")
+cat("Exported group summary to: data/processed/group_summary.csv\n")
+```
+
+# Data Quality Checks
+
+```{r quality-checks}
+# Check for missing critical fields
+missing_checks <- data_for_analysis %>%
+  summarise(
+    missing_datetime = sum(is.na(datetime)),
+    missing_value = sum(is.na(value)),
+    missing_station = sum(is.na(STATION_NO)),
+    missing_variable = sum(is.na(VARIABLE_CODE))
+  )
+
+cat("\nMissing data check:\n")
+print(missing_checks)
+
+# Check detection limit patterns
+dl_patterns <- data_for_analysis %>%
+  filter(is_censored) %>%
+  group_by(VARIABLE_NAME) %>%
+  summarise(
+    n_censored = n(),
+    n_unique_dls = n_distinct(detection_limit, na.rm = TRUE),
+    min_dl = min(detection_limit, na.rm = TRUE),
+    max_dl = max(detection_limit, na.rm = TRUE),
+    has_multiple_dls = has_multiple_dls(detection_limit)
+  ) %>%
+  arrange(desc(n_censored))
+
+cat("\nDetection limit patterns (top 10 parameters):\n")
+print(head(dl_patterns, 10))
+```
+
+# Summary
+
+```{r summary}
+cat("\n=== Stage 1 Complete ===\n")
+cat("Processed", nrow(data_for_analysis), "observations\n")
+cat("Valid parameter-station groups:", valid_summary$valid_groups, "\n")
+cat("Insufficient data groups:", valid_summary$invalid_groups, "\n")
+cat("Overall censoring rate:", round(censoring_summary$censoring_pct, 2), "%\n")
+cat("\nOutputs:\n")
+cat("  - data/processed/filtered_data.csv\n")
+cat("  - data/processed/group_summary.csv\n")
+cat("\nProceed to Stage 2: Seasonal Partitioning (02-partition.Rmd)\n")
+```

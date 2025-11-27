@@ -1,0 +1,246 @@
+digraph "Trend Evaluation" {
+	graph [direction=LR,
+		label="
+[1] 5.7.3 https://projects.itrcweb.org/gsmc-1/Content/GW%20Stats/5%20Methods%20in%20indiv%20Topics/5%207%20Nondetects.htm",
+		labeljust=l,
+		labelloc=b,
+		newrank=True,
+		ordering=out
+	];
+	node [fixedsize=True,
+		label="\N"
+	];
+	start	[fillcolor="#ccffcc",
+		fontsize=16,
+		height=1.8,
+		label=start,
+		penwidth=1.5,
+		shape=ellipse,
+		style=filled,
+		tooltip=start,
+		width=1.8];
+	"n >= 50?"	[fillcolor="#ccffcc",
+		fontsize=16,
+		height=2.2,
+		label="n >= 50?",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="n >= 50?",
+		width=2.2];
+	start -> "n >= 50?"	[color=black,
+		fontsize=16,
+		penwidth=5];
+	"nondetects 
+<= 50.00%"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="nondetects 
+<= 50.00%",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="nondetects 
+<= 50.00%",
+		width=2.2];
+	"n >= 50?" -> "nondetects 
+<= 50.00%"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	end	[fillcolor="#ccffcc",
+		fontsize=16,
+		height=1.8,
+		label=end,
+		penwidth=1.5,
+		shape=doublecircle,
+		style=filled,
+		tooltip=end,
+		width=2];
+	"n >= 50?" -> end	[color=red,
+		fontsize=16,
+		label=No,
+		penwidth=5];
+	"nondetects 
+<= 50.00%" -> end	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	"all samples in 
+single month?"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="all samples in 
+single month?",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="all samples in 
+single month?",
+		width=2.2];
+	"nondetects 
+<= 50.00%" -> "all samples in 
+single month?"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	"all samples in 
+single month?" -> end	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	"any nondetects?"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="any nondetects?",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="any nondetects?",
+		width=2.2];
+	"all samples in 
+single month?" -> "any nondetects?"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	"Seasonal?
+(Kruskal-Wallis)"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="Seasonal?
+(Kruskal-Wallis)",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="Seasonal?
+(Kruskal-Wallis)",
+		width=2.2];
+	"any nondetects?" -> "Seasonal?
+(Kruskal-Wallis)"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	"multiple DLs?"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="multiple DLs?",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="multiple DLs?",
+		width=2.2];
+	"any nondetects?" -> "multiple DLs?"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	do_censeaken	[fillcolor="#d8bfd8",
+		fontsize=16,
+		height=1.8,
+		label=censeaken,
+		penwidth=1.5,
+		shape=box,
+		style=filled,
+		tooltip=censeaken,
+		width=1.8];
+	"Seasonal?
+(Kruskal-Wallis)" -> do_censeaken	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	do_cenken	[fillcolor="#d8bfd8",
+		fontsize=16,
+		height=1.8,
+		label=cenken,
+		penwidth=1.5,
+		shape=box,
+		style=filled,
+		tooltip=cenken,
+		width=1.8];
+	"Seasonal?
+(Kruskal-Wallis)" -> do_cenken	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	"Seasonal?
+(cendiff)"	[fillcolor="#cccccc",
+		fontsize=16,
+		height=2.2,
+		label="Seasonal?
+(cendiff)",
+		penwidth=1.5,
+		shape=diamond,
+		style=filled,
+		tooltip="Seasonal?
+(cendiff)",
+		width=2.2];
+	"multiple DLs?" -> "Seasonal?
+(cendiff)"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	do_recensor	[fillcolor="#d8bfd8",
+		fontsize=16,
+		height=1.8,
+		label=recensor,
+		penwidth=1.5,
+		shape=box,
+		style=filled,
+		tooltip=recensor,
+		width=1.8];
+	"multiple DLs?" -> do_recensor	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	"Seasonal?
+(cendiff)" -> do_censeaken	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Yes,
+		penwidth=3];
+	"Seasonal?
+(cendiff)" -> do_cenken	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=No,
+		penwidth=3];
+	error	[bad_state=True,
+		fillcolor="#cccccc",
+		fontsize=16,
+		height=1.8,
+		label=end,
+		penwidth=1.5,
+		shape=doublecircle,
+		style=filled,
+		tooltip=end,
+		width=1.8];
+	"Seasonal?
+(cendiff)" -> error	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		label=Error,
+		penwidth=3];
+	do_recensor -> "Seasonal?
+(cendiff)"	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		penwidth=3];
+	do_censeaken -> end	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		penwidth=3];
+	do_cenken -> end	[color="#cccccc",
+		fontcolor="#cccccc",
+		fontsize=16,
+		penwidth=3];
+}

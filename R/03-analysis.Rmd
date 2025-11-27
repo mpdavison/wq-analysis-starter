@@ -1,0 +1,395 @@
+---
+title: "Stage 3: Statistical Analysis"
+author: "Water Quality Analysis Pipeline"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Overview
+
+This script implements the ITRC decision tree workflow for baseline water quality trend analysis with censored data. Methods applied:
+
+- **censeaken**: Seasonal Kendall for censored data (NADA2)
+- **cenken**: Mann-Kendall for censored data (NADA)
+- **seasonal_kendall**: Seasonal Kendall for uncensored data (EnvStats)
+- **mann_kendall**: Mann-Kendall for uncensored data (EnvStats)
+- **recensor**: Handles multiple detection limits
+
+# Load Libraries
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(ggplot2)
+
+# Statistical packages for censored data
+library(NADA)
+library(NADA2)
+library(EnvStats)
+library(Kendall)
+
+# Source utility functions
+source("functions/analysis_constants.R")
+source("functions/data_utils.R")
+source("functions/statistical_methods.R")
+```
+
+# Read Partitioned Data
+
+```{r read-data}
+# Load partitioned data from Stage 2
+partitioned_data <- readRDS("../data/processed/partitioned_data.rds")
+filtered_data <- read_csv("../data/processed/filtered_data.csv", show_col_types = FALSE)
+
+cat("Partitioned groups:", nrow(partitioned_data), "\n")
+cat("Analysis pathways:\n")
+print(table(partitioned_data$pathway))
+```
+
+# Check for Multiple Detection Limits
+
+```{r check-multiple-dls}
+# Identify groups with multiple detection limits
+dl_analysis <- partitioned_data %>%
+  mutate(
+    # Check for multiple DLs in censored observations
+    multiple_dls = map_lgl(data, function(df) {
+      censored_obs <- df %>% filter(is_censored)
+      if (nrow(censored_obs) == 0) return(FALSE)
+      has_multiple_dls(censored_obs$detection_limit)
+    }),
+    
+    # Count unique DLs
+    n_unique_dls = map_int(data, function(df) {
+      censored_obs <- df %>% filter(is_censored)
+      if (nrow(censored_obs) == 0) return(0)
+      n_distinct(censored_obs$detection_limit, na.rm = TRUE)
+    })
+  )
+
+# Summary of multiple DL cases
+multi_dl_summary <- dl_analysis %>%
+  filter(has_nondetects) %>%
+  summarise(
+    groups_with_censoring = n(),
+    groups_with_multiple_dls = sum(multiple_dls),
+    mean_unique_dls = mean(n_unique_dls, na.rm = TRUE)
+  )
+
+cat("\nMultiple detection limit summary:\n")
+print(multi_dl_summary)
+```
+
+# Apply Recensor for Multiple DLs
+
+```{r recensor-multiple-dls}
+# Recensor data where multiple DLs exist
+data_recensored <- dl_analysis %>%
+  mutate(
+    # Apply recensor function
+    recensored_data = map2(data, multiple_dls, function(df, needs_recensor) {
+      if (needs_recensor) {
+        # Apply recensoring
+        recensor_result <- recensor_to_single_dl(
+          df$value,
+          df$is_censored,
+          df$detection_limit
+        )
+        
+        # Update dataframe
+        df %>%
+          mutate(
+            value_original = value,
+            value = recensor_result$values,
+            is_censored = recensor_result$censored,
+            detection_limit = recensor_result$detection_limit,
+            recensored = TRUE
+          )
+      } else {
+        df %>% mutate(
+          value_original = value,
+          recensored = FALSE
+        )
+      }
+    })
+  )
+
+cat("Groups recensored:", sum(data_recensored$multiple_dls), "\n")
+```
+
+# Perform Trend Analysis
+
+```{r trend-analysis}
+# Apply appropriate statistical method based on pathway
+trend_results <- data_recensored %>%
+  mutate(
+    # Create time variable (decimal year)
+    trend_analysis = map2(recensored_data, pathway, function(df, path) {
+      
+      # Calculate decimal year for time variable
+      df <- df %>%
+        mutate(
+          decimal_year = year + (month - 1) / 12
+        )
+      
+      # Apply method based on pathway
+      if (path == "insufficient_data") {
+        # Skip analysis
+        return(list(
+          method = "insufficient_data",
+          tau = NA,
+          p_value = NA,
+          slope = NA,
+          success = FALSE,
+          error = paste0("Insufficient data or high censoring (>", MAX_CENSORING_PCT, "%)")
+        ))
+      }
+      
+      if (path == "seasonal_censored") {
+        # Use censeaken
+        return(seasonal_kendall_censored(
+          values = df$value,
+          censored = df$is_censored,
+          seasons = factor(df$season),
+          times = df$decimal_year
+        ))
+      }
+      
+      if (path == "nonseasonal_censored") {
+        # Use cenken
+        return(mann_kendall_censored(
+          values = df$value,
+          censored = df$is_censored,
+          times = df$decimal_year
+        ))
+      }
+      
+      if (path == "seasonal_uncensored") {
+        # Use seasonal_kendall for uncensored data
+        return(seasonal_kendall_uncensored(
+          values = df$value,
+          seasons = factor(df$season),
+          times = df$decimal_year
+        ))
+      }
+      
+      if (path == "nonseasonal_uncensored") {
+        # Use mann_kendall for uncensored data
+        return(mann_kendall_uncensored(
+          values = df$value,
+          times = df$decimal_year
+        ))
+      }
+
+      # Default: return error
+      list(
+        method = "unknown",
+        tau = NA,
+        p_value = NA,
+        slope = NA,
+        success = FALSE,
+        error = "Unknown pathway"
+      )
+    })
+  ) %>%
+  unnest_wider(trend_analysis, names_sep = "_")
+
+# Summary of trend analysis
+trend_summary <- trend_results %>%
+  ungroup() %>%
+  filter(pathway != "insufficient_data") %>%
+  summarise(
+    total_analyzed = n(),
+    successful = sum(trend_analysis_success, na.rm = TRUE),
+    failed = sum(!trend_analysis_success, na.rm = TRUE),
+    significant_trends = sum(trend_analysis_p_value < ALPHA, na.rm = TRUE)
+  )
+
+cat("\nTrend analysis summary:\n")
+print(trend_summary)
+```
+
+# Calculate Summary Statistics
+
+```{r summary-statistics}
+# Calculate quantiles and summary stats
+summary_stats <- trend_results %>%
+  mutate(
+    # Calculate summary statistics
+    stats = map2(recensored_data, has_nondetects, function(df, has_nd) {
+      if (has_nd) {
+        # Use censored methods
+        censored_summary_stats(df$value, df$is_censored)
+      } else {
+        # Simple quantiles
+        list(
+          median = median(df$value, na.rm = TRUE),
+          percentile_5th = quantile(df$value, QUANTILES[1], na.rm = TRUE),
+          percentile_95th = quantile(df$value, QUANTILES[3], na.rm = TRUE),
+          success = TRUE
+        )
+      }
+    })
+  ) %>%
+  unnest_wider(stats, names_sep = "_")
+
+cat("Summary statistics calculated for", nrow(summary_stats), "groups\n")
+```
+
+# Prepare Final Results
+
+```{r prepare-results}
+# Combine all results into final output
+final_results <- summary_stats %>%
+  select(
+    VARIABLE_CODE,
+    VARIABLE_NAME,
+    STATION_NO,
+    STATION_NAME,
+    n_obs,
+    pct_censored,
+    has_nondetects,
+    is_seasonal,
+    pathway,
+    suggested_method,
+    multiple_dls,
+    n_unique_dls,
+    trend_method = trend_analysis_method,
+    tau = trend_analysis_tau,
+    p_value = trend_analysis_p_value,
+    slope = trend_analysis_slope,
+    trend_success = trend_analysis_success,
+    median = stats_median,
+    percentile_5th = stats_percentile_5th,
+    percentile_95th = stats_percentile_95th
+  ) %>%
+  mutate(
+    # Determine analysis status
+    status = case_when(
+      pathway == "insufficient_data" ~ "insufficient_data",
+      trend_success ~ "complete",
+      !trend_success ~ "failed",
+      TRUE ~ "unknown"
+    ),
+    
+    # Classify trend direction
+    trend_direction = case_when(
+      is.na(p_value) ~ NA_character_,
+      p_value >= ALPHA ~ "no_trend",
+      tau > 0 ~ "increasing",
+      tau < 0 ~ "decreasing",
+      TRUE ~ "unclear"
+    )
+  )
+
+# Split into complete and insufficient data
+complete_results <- final_results %>%
+  filter(status %in% c("complete", "failed"))
+
+insufficient_results <- final_results %>%
+  filter(status == "insufficient_data")
+
+cat("\nComplete analyses:", nrow(complete_results), "\n")
+cat("Insufficient data:", nrow(insufficient_results), "\n")
+```
+
+# Export Results
+
+```{r export-results}
+# Export complete results
+write_csv(complete_results, "../output/tables/complete_results.csv")
+cat("Exported complete results to: output/tables/complete_results.csv\n")
+
+# Export insufficient data cases
+write_csv(insufficient_results, "../output/tables/insufficient_data.csv")
+cat("Exported insufficient data to: output/tables/insufficient_data.csv\n")
+
+# Export combined baseline analysis results
+baseline_results <- final_results %>%
+  mutate(
+    source = "baseline_analysis",
+    season = NA_character_,  # Add season column for compatibility
+    site_group = STATION_NAME
+  ) %>%
+  select(
+    source,
+    VARIABLE_CODE,
+    VARIABLE_NAME,
+    season,
+    site_group,
+    n_obs,
+    pct_censored,
+    median,
+    percentile_5th,
+    percentile_95th,
+    method = trend_method,
+    status
+  )
+
+write_csv(baseline_results, "../output/csv/baseline_analysis_results.csv")
+cat("Exported baseline analysis results to: output/csv/baseline_analysis_results.csv\n")
+
+# Save full results with nested data for Stage 4
+trend_results %>%
+  saveRDS("../data/processed/trend_analysis_results.rds")
+cat("Saved trend analysis results to: data/processed/trend_analysis_results.rds\n")
+```
+
+# Trend Direction Summary
+
+```{r trend-direction}
+trend_direction_summary <- complete_results %>%
+  filter(status == "complete") %>%
+  count(trend_direction, name = "n_groups") %>%
+  mutate(percentage = round(n_groups / sum(n_groups) * 100, 1))
+
+cat("\nTrend direction summary:\n")
+print(trend_direction_summary)
+```
+
+# Method Usage Summary
+
+```{r method-usage}
+method_usage <- complete_results %>%
+  count(trend_method, status) %>%
+  arrange(desc(n))
+
+cat("\nStatistical methods applied:\n")
+print(method_usage)
+```
+
+# Summary
+
+```{r summary}
+cat("\n=== Stage 3 Complete ===\n")
+cat("Total groups analyzed:", nrow(final_results), "\n")
+cat("Successful analyses:", nrow(complete_results), "\n")
+cat("Insufficient data cases:", nrow(insufficient_results), "\n")
+cat("Significant trends detected:", trend_summary$significant_trends, "\n")
+cat("Groups recensored:", sum(final_results$multiple_dls, na.rm = TRUE), "\n")
+cat("\nTrend directions:\n")
+print(trend_direction_summary)
+cat("\nOutputs:\n")
+cat("  - output/tables/complete_results.csv\n")
+cat("  - output/tables/insufficient_data.csv\n")
+cat("  - output/csv/baseline_analysis_results.csv\n")
+cat("  - data/processed/trend_analysis_results.rds\n")
+cat("\nProceed to Stage 4: Reporting and Visualization (04-report.Rmd)\n")
+```

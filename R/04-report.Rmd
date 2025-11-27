@@ -1,0 +1,399 @@
+---
+title: "Stage 4: Reporting and Visualization"
+author: "Water Quality Analysis Pipeline"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8
+)
+```
+
+# Overview
+
+This script generates final reports and visualizations for baseline water quality analysis:
+
+- Summary tables of trend analysis results
+- Time series plots with trend lines
+- Censoring visualization
+- Statistical method comparison
+- Export publication-ready figures
+
+# Load Libraries
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(cowplot)
+library(scales)
+library(NADA2)
+
+# Source utility functions
+source("functions/analysis_constants.R")
+source("functions/data_utils.R")
+```
+
+# Read Analysis Results
+
+```{r read-results}
+# Load trend analysis results
+trend_results <- readRDS("../data/processed/trend_analysis_results.rds")
+complete_results <- read_csv("../output/tables/complete_results.csv", show_col_types = FALSE)
+insufficient_results <- read_csv("../output/tables/insufficient_data.csv", show_col_types = FALSE)
+filtered_data <- read_csv("../data/processed/filtered_data.csv", show_col_types = FALSE)
+
+cat("Complete analyses:", nrow(complete_results), "\n")
+cat("Insufficient data:", nrow(insufficient_results), "\n")
+```
+
+# Executive Summary Table
+
+```{r executive-summary}
+# Create high-level summary
+executive_summary <- complete_results %>%
+  summarise(
+    total_parameters = n_distinct(VARIABLE_CODE),
+    total_stations = n_distinct(STATION_NO),
+    total_analyses = n(),
+    mean_observations = round(mean(n_obs, na.rm = TRUE), 0),
+    median_censoring = round(median(pct_censored, na.rm = TRUE), 1),
+    seasonal_groups = sum(is_seasonal, na.rm = TRUE),
+    nonseasonal_groups = sum(!is_seasonal, na.rm = TRUE),
+    significant_trends = sum(p_value < ALPHA, na.rm = TRUE),
+    increasing_trends = sum(trend_direction == "increasing", na.rm = TRUE),
+    decreasing_trends = sum(trend_direction == "decreasing", na.rm = TRUE),
+    no_trends = sum(trend_direction == "no_trend", na.rm = TRUE)
+  )
+
+cat("\n=== Executive Summary ===\n")
+print(t(executive_summary))
+```
+
+# Top Parameters with Significant Trends
+
+```{r top-trends}
+# Identify top parameters with significant trends
+significant_trends <- complete_results %>%
+  filter(p_value < ALPHA) %>%
+  arrange(p_value) %>%
+  select(
+    VARIABLE_NAME,
+    STATION_NAME,
+    n_obs,
+    pct_censored,
+    trend_direction,
+    tau,
+    p_value,
+    slope
+  )
+
+cat("\nTop 20 significant trends:\n")
+print(head(significant_trends, 20))
+```
+
+# Generate Time Series Plots
+
+```{r time-series-plots}
+# Function to create time series plot with trend
+plot_time_series <- function(var_code, station_no, result_row) {
+  
+  # Get data
+  plot_data <- filtered_data %>%
+    filter(VARIABLE_CODE == var_code, STATION_NO == station_no) %>%
+    arrange(datetime)
+  
+  if (nrow(plot_data) == 0) return(NULL)
+  
+  # Create plot
+  p <- ggplot(plot_data, aes(x = datetime, y = value)) +
+    geom_point(aes(color = is_censored, shape = is_censored), 
+               alpha = 0.6, size = 2) +
+    scale_color_manual(
+      values = c("FALSE" = "steelblue", "TRUE" = "coral"),
+      labels = c("FALSE" = "Detected", "TRUE" = "Non-detect")
+    ) +
+    scale_shape_manual(
+      values = c("FALSE" = 16, "TRUE" = 1),
+      labels = c("FALSE" = "Detected", "TRUE" = "Non-detect")
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10)
+    ) +
+    labs(
+      title = paste(result_row$VARIABLE_NAME[1]),
+      subtitle = paste0(
+        result_row$STATION_NAME[1], " | ",
+        "n=", result_row$n_obs[1], ", ",
+        round(result_row$pct_censored[1], 1), "% censored | ",
+        "Trend: ", result_row$trend_direction[1],
+        " (p=", round(result_row$p_value[1], 4), ")"
+      ),
+      x = "Date",
+      y = paste("Concentration"),
+      color = "Status",
+      shape = "Status"
+    )
+  
+  # Add trend line if slope available
+  if (!is.na(result_row$slope[1]) && result_row$slope[1] != 0) {
+    # Simple linear trend overlay
+    p <- p + geom_smooth(method = "lm", se = TRUE, color = "red", 
+                         linetype = "dashed", linewidth = 0.8)
+  }
+  
+  return(p)
+}
+
+# Select top significant trends for visualization
+top_trends_to_plot <- significant_trends %>%
+  head(6)  # Plot top 6
+
+# Generate plots
+if (nrow(top_trends_to_plot) > 0) {
+  for (i in 1:nrow(top_trends_to_plot)) {
+    trend_row <- complete_results %>%
+      filter(
+        VARIABLE_NAME == top_trends_to_plot$VARIABLE_NAME[i],
+        STATION_NAME == top_trends_to_plot$STATION_NAME[i]
+      )
+    
+    p <- plot_time_series(
+      trend_row$VARIABLE_CODE,
+      trend_row$STATION_NO,
+      trend_row
+    )
+    
+    if (!is.null(p)) {
+      print(p)
+      
+      # Save figure
+      filename <- paste0(
+        "../output/figures/",
+        "trend_",
+        gsub("[^A-Za-z0-9]", "_", trend_row$VARIABLE_NAME[1]),
+        "_",
+        gsub("[^A-Za-z0-9]", "_", trend_row$STATION_NAME[1]),
+        ".png"
+      )
+      
+      ggsave(filename, p, width = 10, height = 6, dpi = 300)
+    }
+  }
+}
+```
+
+# Censoring Summary Plot
+
+```{r censoring-summary-plot}
+# Visualize censoring across parameters
+censoring_plot_data <- complete_results %>%
+  arrange(desc(pct_censored)) %>%
+  head(30) %>%
+  mutate(
+    param_label = paste(VARIABLE_NAME, STATION_NAME, sep = " - "),
+    # Create unique labels to avoid factor level duplication
+    param_label = make.unique(param_label),
+    param_label = factor(param_label, levels = rev(unique(param_label)))
+  )
+
+p_censoring <- ggplot(censoring_plot_data, 
+                      aes(x = pct_censored, y = param_label, fill = pathway)) +
+  geom_col(alpha = 0.8) +
+  geom_vline(xintercept = MAX_CENSORING_PCT, linetype = "dashed", color = "red", linewidth = 1) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(face = "bold")
+  ) +
+  labs(
+    title = "Censoring Rates Across Parameters",
+    subtitle = paste0("Top 30 parameters by censoring rate (red line = ", MAX_CENSORING_PCT, "% threshold)"),
+    x = "Percent Censored (%)",
+    y = "Parameter - Station",
+    fill = "Analysis Pathway"
+  )
+
+print(p_censoring)
+ggsave("../output/figures/censoring_summary.png", p_censoring, 
+       width = 12, height = 10, dpi = 300)
+```
+
+# Method Distribution Plot
+
+```{r method-distribution}
+# Visualize statistical methods used
+method_plot_data <- complete_results %>%
+  filter(status == "complete") %>%
+  count(trend_method, trend_direction) %>%
+  mutate(
+    trend_method = factor(trend_method),
+    trend_direction = factor(trend_direction, 
+                             levels = c("increasing", "no_trend", "decreasing", "unclear"))
+  )
+
+p_methods <- ggplot(method_plot_data, 
+                    aes(x = trend_method, y = n, fill = trend_direction)) +
+  geom_col(position = "stack", alpha = 0.8) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold")
+  ) +
+  scale_fill_manual(
+    values = c(
+      "increasing" = "#d73027",
+      "decreasing" = "#4575b4",
+      "no_trend" = "#999999",
+      "unclear" = "#fee090"
+    )
+  ) +
+  labs(
+    title = "Statistical Methods and Trend Directions",
+    subtitle = "Distribution of methods applied across analyses",
+    x = "Statistical Method",
+    y = "Number of Analyses",
+    fill = "Trend Direction"
+  )
+
+print(p_methods)
+ggsave("../output/figures/method_distribution.png", p_methods, 
+       width = 10, height = 6, dpi = 300)
+```
+
+# Summary Statistics by Season
+
+```{r seasonal-summary}
+# Create seasonal summary for seasonal parameters
+seasonal_data <- filtered_data %>%
+  inner_join(
+    complete_results %>% 
+      filter(is_seasonal) %>% 
+      select(VARIABLE_CODE, STATION_NO),
+    by = c("VARIABLE_CODE", "STATION_NO")
+  ) %>%
+  filter(!is.na(season))
+
+if (nrow(seasonal_data) > 0) {
+  seasonal_summary <- seasonal_data %>%
+    group_by(season, VARIABLE_NAME) %>%
+    summarise(
+      n = n(),
+      median_conc = median(value, na.rm = TRUE),
+      pct_censored = round(calc_censoring_pct(is_censored), 1),
+      .groups = "drop"
+    ) %>%
+    arrange(VARIABLE_NAME, match(season, c("Under ice", "High flow", "Open water")))
+  
+  cat("\nSeasonal summary (sample):\n")
+  print(head(seasonal_summary, 20))
+}
+```
+
+# Export Summary Tables
+
+```{r export-tables}
+# Parameter summary table
+parameter_summary <- complete_results %>%
+  group_by(VARIABLE_NAME) %>%
+  summarise(
+    n_stations = n_distinct(STATION_NO),
+    n_analyses = n(),
+    mean_n_obs = round(mean(n_obs, na.rm = TRUE), 0),
+    mean_censoring = round(mean(pct_censored, na.rm = TRUE), 1),
+    seasonal_count = sum(is_seasonal, na.rm = TRUE),
+    significant_trends = sum(p_value < ALPHA, na.rm = TRUE),
+    increasing = sum(trend_direction == "increasing", na.rm = TRUE),
+    decreasing = sum(trend_direction == "decreasing", na.rm = TRUE)
+  ) %>%
+  arrange(desc(significant_trends))
+
+write_csv(parameter_summary, "../output/tables/parameter_summary.csv")
+cat("\nExported parameter summary to: output/tables/parameter_summary.csv\n")
+
+# Station summary table
+station_summary <- complete_results %>%
+  group_by(STATION_NAME) %>%
+  summarise(
+    n_parameters = n_distinct(VARIABLE_CODE),
+    n_analyses = n(),
+    mean_n_obs = round(mean(n_obs, na.rm = TRUE), 0),
+    mean_censoring = round(mean(pct_censored, na.rm = TRUE), 1),
+    significant_trends = sum(p_value < ALPHA, na.rm = TRUE)
+  ) %>%
+  arrange(desc(n_parameters))
+
+write_csv(station_summary, "../output/tables/station_summary.csv")
+cat("Exported station summary to: output/tables/station_summary.csv\n")
+```
+
+# Data Quality Report
+
+```{r quality-report}
+quality_metrics <- list(
+  total_groups_analyzed = nrow(complete_results),
+  insufficient_data_groups = nrow(insufficient_results),
+  success_rate = round(nrow(complete_results) / 
+                         (nrow(complete_results) + nrow(insufficient_results)) * 100, 1),
+  mean_sample_size = round(mean(complete_results$n_obs, na.rm = TRUE), 0),
+  median_censoring = round(median(complete_results$pct_censored, na.rm = TRUE), 1),
+  groups_with_multiple_dls = sum(complete_results$multiple_dls, na.rm = TRUE),
+  censored_methods_used = sum(complete_results$has_nondetects, na.rm = TRUE)
+)
+
+cat("\n=== Data Quality Report ===\n")
+print(as.data.frame(quality_metrics))
+```
+
+# Final Summary
+
+```{r final-summary}
+cat("\n=== Stage 4 Complete ===\n")
+cat("Analysis pipeline successfully completed!\n\n")
+
+cat("Key Results:\n")
+cat("  - Parameters analyzed:", executive_summary$total_parameters, "\n")
+cat("  - Stations analyzed:", executive_summary$total_stations, "\n")
+cat("  - Total analyses:", executive_summary$total_analyses, "\n")
+cat("  - Significant trends:", executive_summary$significant_trends, 
+    "(", round(executive_summary$significant_trends/executive_summary$total_analyses*100, 1), "%)\n")
+cat("  - Increasing trends:", executive_summary$increasing_trends, "\n")
+cat("  - Decreasing trends:", executive_summary$decreasing_trends, "\n")
+cat("  - No trends:", executive_summary$no_trends, "\n\n")
+
+cat("Data Quality:\n")
+cat("  - Mean observations per group:", quality_metrics$mean_sample_size, "\n")
+cat("  - Median censoring rate:", quality_metrics$median_censoring, "%\n")
+cat("  - Groups with multiple DLs:", quality_metrics$groups_with_multiple_dls, "\n")
+cat("  - Censored methods used:", quality_metrics$censored_methods_used, "\n\n")
+
+cat("Outputs Generated:\n")
+cat("  Tables:\n")
+cat("    - output/tables/complete_results.csv\n")
+cat("    - output/tables/insufficient_data.csv\n")
+cat("    - output/tables/parameter_summary.csv\n")
+cat("    - output/tables/station_summary.csv\n")
+cat("  Figures:\n")
+cat("    - output/figures/trend_*.png (time series)\n")
+cat("    - output/figures/censoring_summary.png\n")
+cat("    - output/figures/method_distribution.png\n")
+cat("  Data:\n")
+cat("    - output/csv/baseline_analysis_results.csv\n\n")
+
+cat("=== Analysis Pipeline Complete ===\n")
+```

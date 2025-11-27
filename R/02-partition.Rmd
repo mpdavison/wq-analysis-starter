@@ -1,0 +1,269 @@
+---
+title: "Stage 2: Seasonal Partitioning"
+author: "Water Quality Analysis Pipeline"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Overview
+
+This script performs seasonal partitioning analysis to determine if water quality parameters show seasonal patterns. Uses:
+
+- **Kruskal-Wallis test** for uncensored data
+- **cendiff** for censored data with multiple groups
+
+Results determine which trend analysis method to use in Stage 3.
+
+# Load Libraries
+
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+
+# Statistical packages for censored data
+library(NADA)
+library(NADA2)
+
+# Source utility functions
+source("functions/analysis_constants.R")
+source("functions/data_utils.R")
+source("functions/statistical_methods.R")
+```
+
+# Read Processed Data
+
+```{r read-data}
+# Load filtered data from Stage 1
+filtered_data <- read_csv("../data/processed/filtered_data.csv", show_col_types = FALSE)
+group_summary <- read_csv("../data/processed/group_summary.csv", show_col_types = FALSE)
+
+cat("Filtered data:", nrow(filtered_data), "observations\n")
+cat("Parameter-station groups:", nrow(group_summary), "\n")
+```
+
+# Filter Valid Groups
+
+```{r filter-valid}
+# Only analyze groups with sufficient data (n >= MIN_SAMPLE_SIZE)
+valid_groups <- group_summary %>%
+  filter(n_obs >= MIN_SAMPLE_SIZE)
+
+cat(paste0("Groups with n >= ", MIN_SAMPLE_SIZE, ":"), nrow(valid_groups), "\n")
+
+# Filter data to valid groups only
+analysis_data <- filtered_data %>%
+  inner_join(
+    valid_groups %>% select(VARIABLE_CODE, STATION_NO),
+    by = c("VARIABLE_CODE", "STATION_NO")
+  )
+
+cat("Observations in valid groups:", nrow(analysis_data), "\n")
+```
+
+# Test for Seasonality
+
+```{r test-seasonality}
+# Group by parameter and station, test for seasonal differences
+seasonality_results <- analysis_data %>%
+  filter(!is.na(season)) %>%
+  group_by(VARIABLE_CODE, VARIABLE_NAME, STATION_NO, STATION_NAME) %>%
+  nest() %>%
+  mutate(
+    # Calculate metrics
+    n_obs = map_int(data, nrow),
+    pct_censored = map_dbl(data, ~calc_censoring_pct(.x$is_censored)),
+    has_nondetects = map_lgl(data, ~any(.x$is_censored)),
+    single_month = map_lgl(data, ~is_single_month(.x$month)),
+    n_seasons = map_int(data, ~n_distinct(.x$season, na.rm = TRUE)),
+    
+    # Perform seasonality test
+    seasonality_test = map2(data, has_nondetects, function(df, has_nd) {
+      if (has_nd) {
+        # Use cendiff for censored data
+        test_seasonal_differences(df$value, df$is_censored, df$season)
+      } else {
+        # Use Kruskal-Wallis for uncensored data
+        kruskal_wallis_test(df$value, df$season)
+      }
+    })
+  ) %>%
+  unnest_wider(seasonality_test)
+
+# Summary of seasonality
+seasonality_summary <- seasonality_results %>%
+  ungroup() %>%
+  summarise(
+    total_tested = n(),
+    seasonal = sum(is_seasonal, na.rm = TRUE),
+    non_seasonal = sum(!is_seasonal, na.rm = TRUE),
+    single_month_excluded = sum(single_month, na.rm = TRUE)
+  )
+
+print(seasonality_summary)
+```
+
+# Categorize by Analysis Pathway
+
+```{r categorize-pathway}
+# Assign analysis method based on decision tree
+analysis_pathways <- seasonality_results %>%
+  filter(!single_month) %>%  # Exclude single-month data
+  mutate(
+    # Check censoring threshold
+    high_censoring = pct_censored > MAX_CENSORING_PCT,
+    
+    # Determine analysis pathway
+    pathway = case_when(
+      high_censoring ~ "insufficient_data",
+      !has_nondetects & is_seasonal ~ "seasonal_uncensored",
+      !has_nondetects & !is_seasonal ~ "nonseasonal_uncensored",
+      has_nondetects & is_seasonal ~ "seasonal_censored",
+      has_nondetects & !is_seasonal ~ "nonseasonal_censored",
+      TRUE ~ "other"
+    ),
+    
+    # Suggested method
+    suggested_method = case_when(
+      pathway == "insufficient_data" ~ "insufficient_data",
+      pathway == "seasonal_uncensored" ~ "seasonal_kendall",
+      pathway == "nonseasonal_uncensored" ~ "mann_kendall",
+      pathway == "seasonal_censored" ~ "censeaken",
+      pathway == "nonseasonal_censored" ~ "cenken",
+      TRUE ~ "review_needed"
+    )
+  )
+
+# Pathway summary
+pathway_summary <- analysis_pathways %>%
+  ungroup() %>%
+  count(pathway, suggested_method) %>%
+  arrange(desc(n))
+
+cat("\nAnalysis pathway distribution:\n")
+print(pathway_summary)
+```
+
+# Export Partitioning Results
+
+```{r export-results}
+# Prepare export with nested data
+export_data <- analysis_pathways %>%
+  select(
+    VARIABLE_CODE,
+    VARIABLE_NAME,
+    STATION_NO,
+    STATION_NAME,
+    n_obs,
+    n_seasons,
+    pct_censored,
+    has_nondetects,
+    single_month,
+    method,
+    statistic,
+    p_value,
+    is_seasonal,
+    success,
+    pathway,
+    suggested_method
+  )
+
+# Export partitioning results
+write_csv(export_data, "../output/csv/partitioning_results.csv")
+cat("Exported partitioning results to: output/csv/partitioning_results.csv\n")
+
+# Also save as RDS with nested data for Stage 3
+analysis_pathways %>%
+  saveRDS("../data/processed/partitioned_data.rds")
+cat("Saved partitioned data to: data/processed/partitioned_data.rds\n")
+```
+
+# Visualization: Seasonality Patterns
+
+```{r viz-seasonal-patterns, fig.height=8}
+# Plot top 10 parameters showing seasonal patterns
+top_seasonal <- analysis_pathways %>%
+  filter(is_seasonal) %>%
+  arrange(desc(n_obs)) %>%
+  head(10)
+
+if (nrow(top_seasonal) > 0) {
+  # Create plot labels in top_seasonal first
+  top_seasonal_labeled <- top_seasonal %>%
+    mutate(plot_label = paste(VARIABLE_NAME, "-", STATION_NAME))
+  
+  # Get data for these parameters
+  seasonal_plot_data <- analysis_data %>%
+    inner_join(
+      top_seasonal_labeled %>% select(VARIABLE_CODE, STATION_NO, plot_label),
+      by = c("VARIABLE_CODE", "STATION_NO")
+    ) %>%
+    filter(!is.na(season))
+  
+  # Create boxplots
+  p <- ggplot(seasonal_plot_data, aes(x = season, y = value, fill = season)) +
+    geom_boxplot(alpha = 0.7) +
+    facet_wrap(~plot_label, scales = "free_y", ncol = 2) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    ) +
+    labs(
+      title = "Seasonal Patterns in Top 10 Parameters",
+      subtitle = paste0("Parameters showing significant seasonal differences (Kruskal-Wallis/cendiff p < ", ALPHA, ")"),
+      x = "Season",
+      y = "Concentration"
+    )
+  
+  print(p)
+}
+```
+
+# Censoring Analysis by Pathway
+
+```{r censoring-by-pathway}
+censoring_by_pathway <- analysis_pathways %>%
+  group_by(pathway, suggested_method) %>%
+  summarise(
+    n_groups = n(),
+    mean_censoring = round(mean(pct_censored, na.rm = TRUE), 2),
+    median_n = median(n_obs, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nCensoring statistics by analysis pathway:\n")
+print(censoring_by_pathway)
+```
+
+# Summary
+
+```{r summary}
+cat("\n=== Stage 2 Complete ===\n")
+cat("Groups tested for seasonality:", nrow(seasonality_results), "\n")
+cat("Seasonal patterns detected:", seasonality_summary$seasonal, "\n")
+cat("Non-seasonal patterns:", seasonality_summary$non_seasonal, "\n")
+cat("Single-month groups excluded:", seasonality_summary$single_month_excluded, "\n")
+cat("\nAnalysis pathways:\n")
+print(pathway_summary)
+cat("\nOutputs:\n")
+cat("  - output/csv/partitioning_results.csv\n")
+cat("  - data/processed/partitioned_data.rds\n")
+cat("\nProceed to Stage 3: Statistical Analysis (03-analysis.Rmd)\n")
+```

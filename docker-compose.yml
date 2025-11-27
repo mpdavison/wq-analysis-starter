@@ -1,0 +1,19 @@
+services:
+  r-analysis:
+    image: rocker/verse:latest
+    container_name: r-analysis
+    volumes:
+      - rstudio-home:/home/rstudio
+      - .:/workspace
+    working_dir: /workspace
+    ports:
+      - "38788:8787"
+    environment:
+      - PASSWORD=rstudio
+      - DISABLE_AUTH=false
+    stdin_open: true
+    tty: true
+    command: /init
+
+volumes:
+  rstudio-home:
