@@ -24,12 +24,12 @@ reports/*.pdf
 *.swo
 
 # Keep output structure but ignore contents initially
-# output/csv/*
-# output/figures/*
-# output/tables/*
-# !output/csv/.gitkeep
-# !output/figures/.gitkeep
-# !output/tables/.gitkeep
+output/csv/*
+output/figures/*
+output/tables/*
+!output/csv/.gitkeep
+!output/figures/.gitkeep
+!output/tables/.gitkeep
 
 # Ignore renv library (use renv.lock instead)
 renv/library/
